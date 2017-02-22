@@ -1,8 +1,0 @@
-if [ "$#" -eq 1 ]; then
-    type=$1
-    mkdir $type
-    eval which mpirun
-    #bsub -q psfehhiprioq -n 2 -R "span[ptile=1]" -o $type/%J.out mpirun temp.sh $type
-else
-    echo "Give name of the test"
-fi
