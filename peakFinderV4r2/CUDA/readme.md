@@ -1,0 +1,3 @@
+#CUDA
+
+run: `make run`
