@@ -18,6 +18,8 @@ parser.add_argument('-l','--language', help='Run benchmark in Python: python or 
 
 args = parser.parse_args()
 
+FOLDER = '/global/homes/w/weninc/drpeval/nersc-knl-benchmark'
+
 if args.target == 'haswell':
     # haswell @ cori
     def get_cmd(nproc, output_file):
@@ -26,9 +28,11 @@ if args.target == 'haswell':
         else:
             spread = 1
         if args.language == 'c++':
-            return 'srun -n %d -c %d --cpu_bind=cores /global/homes/w/weninc/haswell.out %s' %(nproc, spread, output_file)
+            execute = os.path.join(FOLDER, 'haswell.out')
+            return 'srun -n %d -c %d --cpu_bind=cores %s %s' %(nproc, spread, execute, output_file)
         elif args.language == 'python':
-            return 'srun -n %d -c %d --cpu_bind=cores python /global/homes/w/weninc/angular-integration.py %s' %(nproc, spread, output_file)
+            execute = os.path.join(FOLDER, 'angular-integration.py')
+            return 'srun -n %d -c %d --cpu_bind=cores python %s %s' %(nproc, spread, execute, output_file)
 
     nprocs = list(range(2, 34, 2))
     nprocs.insert(0, 1)
@@ -44,9 +48,11 @@ elif args.target == 'knl':
         else:
             spread = 1
         if args.language == 'c++':
-            return 'srun -n %d -c %d --cpu_bind=cores numactl -p 1 /global/homes/w/weninc/knl.out %s' %(nproc, spread, output_file)
+            execute = os.path.join(FOLDER, 'knl.out')
+            return 'srun -n %d -c %d --cpu_bind=cores numactl -p 1 %s %s' %(nproc, spread, execute, output_file)
         elif args.language == 'python':
-            return 'srun -n %d -c %d --cpu_bind=cores numactl -p 1 python /global/homes/w/weninc/angular-integration.py %s' %(nproc, spread, output_file)
+            execute = os.path.join(FOLDER, 'angular-integration.py')
+            return 'srun -n %d -c %d --cpu_bind=cores numactl -p 1 python %s %s' %(nproc, spread, execute, output_file)
             # numactl -p 1
 
     nprocs = list(range(2, 66, 2))

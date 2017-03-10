@@ -13,4 +13,4 @@ module load python
 
 #run the application:
 #python run.py -t knl -o results-python-knl.txt -l python
-python run.py -t knl -o results-cpp-knl-flat.txt -l c++
+python /global/homes/w/weninc/drpeval/nersc-knl-benchmark/run.py -t knl -o results-cpp-knl-flat-vec.txt -l c++
