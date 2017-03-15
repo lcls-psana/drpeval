@@ -6,6 +6,7 @@ struct SlacConfig
 {
 	parallelism : int32;
 	copies      : int32;
+  flood_only : bool;
 }
 
 local cstring = terralib.includec("string.h")
@@ -29,6 +30,7 @@ terra SlacConfig:initialize_from_command()
   var i = 1
   self.parallelism = 1
   self.copies = 32
+  self.flood_only = false
   while i < args.argc do
     if cstring.strcmp(args.argv[i], "-h") == 0 then
       print_usage_and_abort()
@@ -38,6 +40,8 @@ terra SlacConfig:initialize_from_command()
 		elseif cstring.strcmp(args.argv[i], "-c") == 0 then
       i = i + 1
       self.copies = c.atoi(args.argv[i])
+    elseif cstring.strcmp(args.argv[i], "-pfloodonly") == 0 then
+      self.flood_only = true
     end
     i = i + 1
   end

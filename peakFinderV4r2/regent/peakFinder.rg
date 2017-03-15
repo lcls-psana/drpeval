@@ -114,7 +114,11 @@ task main()
   do
     __demand(__spmd)
     for color in p_data.colors do
-      AlImgProc.peakFinderV4r2(p_data[color], p_peaks[color], rank, m_win, THR_HIGH, THR_LOW, r0, dr)
+      if config.flood_only then
+        AlImgProc.peakFinderV4r2_flood(p_data[color], p_peaks[color], rank, m_win, THR_HIGH, THR_LOW, r0, dr)
+      else
+        AlImgProc.peakFinderV4r2(p_data[color], p_peaks[color], rank, m_win, THR_HIGH, THR_LOW, r0, dr)
+      end
     end
   end
   -- gpu code

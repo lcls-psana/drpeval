@@ -127,6 +127,7 @@ extern "C" void processImages(float *data, Peak *peak_out, uint *data_out)
 	cudaEventElapsedTime(&miliseconds, t0, t1);
 	printf("passing data to gpu takes %f miliseconds\n", miliseconds);
 	cudaEventRecord(t0);
+	// floodFill v1
 	for(uint imgId = 0; imgId < EVENTS * SHOTS; imgId++)
 	{
 		filterByThrHigh<<<BLOCKS_PER_SHOT, THREADS_PER_BLOCK>>>(d_data, d_conmap, imgId);

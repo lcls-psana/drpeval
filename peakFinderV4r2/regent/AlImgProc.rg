@@ -247,6 +247,104 @@ do
 	return 0
 end
 
+local write_flood_fill = false
+task AlImgProc.peakFinderV4r2_flood(data : region(ispace(int3d), Pixel), peaks : region(ispace(int3d), Peak),  rank : int, win : WinType, thr_high : double, thr_low : double, r0 : double, dr : double)
+where
+  reads (data), writes(peaks)
+do
+  var ts_start = c.legion_get_current_time_in_micros()
+  var index : uint32 = 1
+  var half_width : int = [int](r0 + dr)
+  -- c.printf("p_data.bounds.lo.x:%d, p_data.bounds.hi.x:%d\n",peaks.bounds.lo.x, peaks.bounds.hi.x)
+  -- var HEIGHT = data.bounds.hi.y + 1
+  -- var WIDTH = data.bounds.hi.x + 1
+  var idx_x : int[BUFFER_SIZE]
+  var idx_y : int[BUFFER_SIZE]
+  var num_peaks = 0
+  var conmap : int[WIDTH*HEIGHT]
+
+  var f : &c.FILE
+  if write_flood_fill then
+    f = c.fopen("peaks.regent.img","w")
+  end
+
+  -- c.printf("height:%d,width:%d\n",HEIGHT,WIDTH)
+  -- var r_conmap = region(ispace(int2d, {WIDTH,HEIGHT}), uint32)
+  -- for p_i in is do
+  for i = data.bounds.lo.z, data.bounds.hi.z + 1 do
+    for j = 0, MAX_PEAKS do
+      peaks[{0,j,i}].valid = false
+    end 
+  end
+  
+  for p_i = data.bounds.lo.z, data.bounds.hi.z + 1 do
+    var queue : Queue
+    queue:init()
+    var shot_count = 0   
+    for i = 0, WIDTH*HEIGHT do
+      conmap[i] = 0
+    end
+    var set = 0
+    -- flood fill
+    for row = win.top, win.bot + 1 do
+      for col = win.left, win.right + 1 do
+        if data[{col, row, p_i}].cspad > thr_high and conmap[row*WIDTH+col] == 0 then
+          set += 1
+          conmap[row * WIDTH + col] = set
+          queue:clear()
+          queue:enqueue({col, row, p_i})
+          while not queue:empty() do
+            var p = queue:dequeue()
+            if p.x - 1 >= win.left then
+              var t : int3d = {p.x - 1, p.y, p.z}
+              if conmap[t.y*WIDTH+t.x] == 0 and data[t].cspad > thr_low then
+                queue:enqueue(t)
+                conmap[t.y*WIDTH+t.x] = set
+              end
+            end
+            if p.x + 1 <= win.right then
+              var t : int3d = {p.x + 1, p.y, p.z}
+              if conmap[t.y*WIDTH+t.x] == 0 and data[t].cspad > thr_low  then
+                queue:enqueue(t)
+                conmap[t.y*WIDTH+t.x] = set
+              end
+            end
+            if p.y - 1 >= win.top then
+              var t : int3d = {p.x, p.y - 1, p.z}
+              if conmap[t.y*WIDTH+t.x] == 0 and data[t].cspad > thr_low  then
+                queue:enqueue(t)
+                conmap[t.y*WIDTH+t.x] = set
+              end
+            end
+            if p.y + 1 <= win.bot then
+              var t : int3d = {p.x, p.y + 1, p.z}
+              if conmap[t.y*WIDTH+t.x] == 0 and data[t].cspad > thr_low then
+                queue:enqueue(t)
+                conmap[t.y*WIDTH+t.x] = set
+              end
+            end
+          end
+        end
+      end
+    end
+    if write_flood_fill then
+      var buf = [&float](c.malloc(WIDTH * HEIGHT * 4))
+      for i = 0, HEIGHT*WIDTH do
+        if conmap[i] > 0 then
+          buf[i] = 1
+        else
+          buf[i] = 0
+        end
+      end
+      c.fwrite(buf, 4, WIDTH*HEIGHT, f)
+      c.free(buf)
+    end
+  end
+  var ts_stop = c.legion_get_current_time_in_micros()
+  c.printf("peakFinderTask: (%d - %d) starts from %.6f, ends at %.6f\n", data.bounds.lo.z, data.bounds.hi.z + 1, (ts_start) * 1e-6, (ts_stop) * 1e-6)
+  return 0
+end
+
 __demand(__cuda)
 task AlImgProc.floodFill_gpu(data : region(ispace(int3d), Pixel), conmap : region(ispace(int3d), uint32), stop : region(ispace(int1d), bool), acc_stop : region(ispace(int1d), bool), rank : int, win : WinType, thr_high : double, thr_low : double, r0 : double, dr : double)
 where
