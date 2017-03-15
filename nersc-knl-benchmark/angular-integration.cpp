@@ -15,50 +15,59 @@ class AngularIntegrator
 {
 public:
     AngularIntegrator(int xcenter, int ycenter, vector<float>& radial_bins);
+    ~AngularIntegrator();
     void operator() (float* img, float* hist);
 private:
-    vector<int> m_bin_indices;
-    vector<float> m_norm;
+    int* m_bin_indices;
+    float* m_norm;
+    size_t m_norm_size;
 };
 
 AngularIntegrator::AngularIntegrator(int xcenter, int ycenter, vector<float>& radial_bins)
 {
-
-    m_bin_indices.reserve(IMG_SIZE);
+    posix_memalign((void**)&m_bin_indices, 64, sizeof(int)*IMG_SIZE);
+    size_t index = 0;
     for (int i=0; i<N; i++) {
         for (int j=0; j<N; j++) {
             float x = i - xcenter;
             float y = j - ycenter;
             float radius = sqrtf(x*x + y*y);
             auto it = lower_bound(radial_bins.begin(), radial_bins.end(), radius);
-            m_bin_indices.push_back(distance(radial_bins.begin(), it));
+            m_bin_indices[index] = distance(radial_bins.begin(), it);
+            index++;
         }
     }
-
-    m_norm.resize(radial_bins.size()+1);
+    m_norm_size = radial_bins.size()+1;
+    posix_memalign((void**)&m_norm, 64, sizeof(float)*m_norm_size);
     // bincount
     for (size_t i=0; i<IMG_SIZE; i++) {
         m_norm[m_bin_indices[i]] += 1;
     }
 }
 
+AngularIntegrator::~AngularIntegrator()
+{
+    free(m_bin_indices);
+    free(m_norm);
+}
+
 void AngularIntegrator::operator() (float* img, float* hist)
 {
-    int nbins = m_norm.size() - 1;
-    posix_memalign((void**)&hist, 32, sizeof(float)*nbins);
+    int nbins = m_norm_size - 1;
+    posix_memalign((void**)&hist, 64, sizeof(float)*nbins);
+
+    #pragma omp simd
+    #pragma vector aligned
     for (size_t i=0; i<IMG_SIZE; i++) {
         hist[m_bin_indices[i]] += img[i];
     }
 
-    for (size_t i=0; i<m_norm.size()-1; i++) {
+    #pragma omp simd
+    #pragma vector aligned
+    for (size_t i=0; i<nbins; i++) {
         hist[i] /= m_norm[i];
     }
 }
-
-/*
-#pragma omp simd
-#pragma vector aligned
-*/
 
 int main(int argc, char *argv[])
 {
@@ -85,7 +94,7 @@ int main(int argc, char *argv[])
     uniform_real_distribution<float> dis(0, 1000);
 
     for (int i=0; i<nimages; i++) {
-        posix_memalign((void**)&images[i], 32, sizeof(float)*IMG_SIZE);
+        posix_memalign((void**)&images[i], 64, sizeof(float)*IMG_SIZE);
          for (size_t j=0; j<IMG_SIZE; j++) {
              images[i][j] = dis(gen);
          }
