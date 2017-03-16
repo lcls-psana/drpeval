@@ -1,3 +1,3 @@
 *.o
-CUDA/bin/
-CUDA/peakFinder
+*/bin/
+*/peakFinder
