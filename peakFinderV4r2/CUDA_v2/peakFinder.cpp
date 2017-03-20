@@ -8,7 +8,7 @@
 // static std::string FILE_NAME = "../regent/small_test";
 static std::string FILE_NAME = "/reg/d/psdm/cxi/cxitut13/scratch/cpo/test1000.bin";
 bool WRITE_FILE = true;
-bool WRITE_PEAKS = false;
+bool WRITE_PEAKS = true;
 
 void load_file(std::string file_name, float *data)
 {
@@ -48,13 +48,13 @@ void write_file(std::string file_name, unsigned int *data)
 	fclose(pFile);
 }
 
-void write_peaks(std::string file_name, Peak *peaks)
+void write_peaks(std::string file_name, Peak *peaks, int npeaks)
 {
 	FILE *pFile = fopen(file_name.c_str(), "w");
 	if (pFile)
 	{
 		char hdr[] = "Evt Seg  Row  Col  Npix      Amax      Atot   rcent   ccent rsigma  csigma rmin rmax cmin cmax    bkgd     rms     son\n";
-		for (int i = 0; i < MAX_PEAKS; i++)
+		for (int i = 0; i < npeaks; i++)
 		{
 			Peak peak = peaks[i];
 			if (peak.valid)
@@ -77,11 +77,12 @@ int main()
 	{
 		data_out = new unsigned int[LSIZE];
 	}
-	if (WRITE_PEAKS)
-	{
-		peak_out = new Peak[MAX_PEAKS];
-	}
-	processImages(data, peak_out, data_out);
+	// if (WRITE_PEAKS)
+	// {
+	// 	peak_out = new Peak[MAX_PEAKS];
+	// }
+	int npeaks = 0;
+	processImages(data, peak_out, npeaks, data_out);
 	if (WRITE_FILE)
 	{
 		write_file("peaks.img", data_out);
@@ -89,7 +90,7 @@ int main()
 	}
 	if (WRITE_PEAKS)
 	{
-		write_peaks("peaks.txt", peak_out);
+		write_peaks("peaks.txt", peak_out, npeaks);
 		delete[] peak_out;
 	}
 

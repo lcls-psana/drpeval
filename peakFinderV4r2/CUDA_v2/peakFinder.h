@@ -11,11 +11,12 @@ const long WIDTH = 388;
 const long HEIGHT = 185;
 const long LSIZE = EVENTS * SHOTS * WIDTH * HEIGHT;
 
-const int rank = 5;
+const int rank = 4;
 const float thr_high = 150;
 const float thr_low = 10;
 const float r0 = 5;
 const float dr = 0.05;
+const int HALF_WIDTH = (int)(r0 + dr);
 const float peak_npix_min = 2;
 const float peak_npix_max = 50;
 const float peak_amax_thr = 10;
@@ -53,6 +54,6 @@ struct Win{
   Win():top(0),bot(HEIGHT),left(0),right(WIDTH){}
 };
 
-extern "C" void processImages(float *data, Peak *peaks_out, unsigned int *data_out);
+extern "C" void processImages(float *data, Peak *&peaks_out, int &npeaks, unsigned int *data_out);
 
 #endif
