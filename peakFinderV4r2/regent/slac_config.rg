@@ -7,6 +7,7 @@ struct SlacConfig
 	parallelism : int32;
 	copies      : int32;
   flood_only : bool;
+  gpu_compare : bool;
 }
 
 local cstring = terralib.includec("string.h")
@@ -31,6 +32,7 @@ terra SlacConfig:initialize_from_command()
   self.parallelism = 1
   self.copies = 32
   self.flood_only = false
+  self.gpu_compare = false
   while i < args.argc do
     if cstring.strcmp(args.argv[i], "-h") == 0 then
       print_usage_and_abort()
@@ -42,6 +44,8 @@ terra SlacConfig:initialize_from_command()
       self.copies = c.atoi(args.argv[i])
     elseif cstring.strcmp(args.argv[i], "-pfloodonly") == 0 then
       self.flood_only = true
+    elseif cstring.strcmp(args.argv[i], "-pgpucompare") == 0 then
+      self.gpu_compare = true
     end
     i = i + 1
   end

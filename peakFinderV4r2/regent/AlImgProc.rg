@@ -15,6 +15,8 @@ local c = regentlib.c
 --------------------------------------------------------------------------------
 local AlImgProc = {}
 
+local WIDTH = 388
+local HEIGHT = 185
 local SHOTS = 32
 local MAX_PEAKS = 200
 local npix_min = 2
@@ -413,6 +415,213 @@ do
   end
   var ts_stop = c.legion_get_current_time_in_micros();
   c.printf("peakFinderTask: %f miliseconds\n", (ts_stop - ts_start) * 1e-3)
+end
+
+task AlImgProc.peakFinder_gpuCompare(d_data : region(ispace(int3d), Pixel), peaks : region(ispace(int3d), Peak),  rank : int, win : WinType, thr_high : double, thr_low : double, r0 : double, dr : double)
+where
+  reads (d_data), writes(peaks)
+do
+  var ts_start = c.legion_get_current_time_in_micros() 
+  -- filterByThrHigh_v2
+  var FILTER_PATCH_WIDTH = 32;
+  var FILTER_PATCH_HEIGHT = 4; 
+  var FILTER_THREADS_PER_PATCH = FILTER_PATCH_WIDTH * FILTER_PATCH_HEIGHT;
+  var FILTER_PATCH_ON_WIDTH = (WIDTH) / FILTER_PATCH_WIDTH;
+  var FILTER_PATCH_ON_HEIGHT = (HEIGHT + FILTER_PATCH_HEIGHT - 1) / FILTER_PATCH_HEIGHT;
+  var FILTER_PATCH_PER_IMAGE = FILTER_PATCH_ON_WIDTH * FILTER_PATCH_ON_HEIGHT;
+  var NUM_NMS_AREA = FILTER_PATCH_WIDTH / FILTER_PATCH_HEIGHT;
+  var CENTER_SIZE = (d_data.bounds.hi.z+1 - d_data.bounds.lo.z) * FILTER_PATCH_PER_IMAGE * NUM_NMS_AREA
+  var d_centers = [&uint32](c.malloc(CENTER_SIZE * 4))
+  var center_idx = 0
+  var npix = 0
+  var num_peaks = 0
+  for imgId = d_data.bounds.lo.z, d_data.bounds.hi.z+1 do
+    for patch_y = 0, FILTER_PATCH_ON_HEIGHT do
+      for patch_x = 0, FILTER_PATCH_ON_WIDTH do
+        var data : float[32][4]
+        for y = 0, FILTER_PATCH_HEIGHT do
+          for x = 0, FILTER_PATCH_WIDTH do
+            var col = patch_x * FILTER_PATCH_WIDTH + x
+            var row = patch_y * FILTER_PATCH_HEIGHT + y
+            data[y][x] = d_data[{col, row, imgId}].cspad
+          end
+        end
+        for area = 0, NUM_NMS_AREA do
+          var max_v : float = 0
+          var max_id : uint32 = 0
+          for y = 0, FILTER_PATCH_HEIGHT do
+            for x = area * FILTER_PATCH_HEIGHT, area * FILTER_PATCH_HEIGHT + FILTER_PATCH_HEIGHT do
+              if (data[y][x] > max_v) then
+                var col = patch_x * FILTER_PATCH_WIDTH + x
+                var row = patch_y * FILTER_PATCH_HEIGHT + y
+                max_v = data[y][x]
+                max_id = imgId * (WIDTH * HEIGHT) + row * WIDTH + col
+              end
+            end
+          end
+          if max_v > thr_high then
+            d_centers[center_idx] = max_id
+            npix += 1
+          else
+            d_centers[center_idx] = 0
+          end
+          center_idx += 1
+        end
+      end
+    end
+  end
+  -- stream compaction
+  var d_dense_centers = [&uint32](c.malloc(npix * 4))
+  center_idx = 0
+  for i = 0, CENTER_SIZE do
+    if d_centers[i] > 0 then
+      d_dense_centers[center_idx] = d_centers[i]
+      center_idx += 1
+    end
+  end
+  c.free(d_centers)
+  d_centers = d_dense_centers
+
+  -- floodFill_v2
+  var HALF_WIDTH = 5;
+  var PATCH_WIDTH = (2 * HALF_WIDTH + 1);
+  var FF_LOAD_THREADS_PER_CENTER = 64;
+  var FF_THREADS_PER_CENTER = 32;
+  var FF_INFO_THREADS_PER_CENTER = FF_THREADS_PER_CENTER;
+  var FF_THREADS_PER_BLOCK = 64;
+  var FF_LOAD_PASS = (2 * HALF_WIDTH + 1) * (2 * HALF_WIDTH + 1) / FF_LOAD_THREADS_PER_CENTER + 1;
+  var FF_CENTERS_PER_BLOCK = FF_THREADS_PER_BLOCK / FF_LOAD_THREADS_PER_CENTER;
+  for blockIdx = 0, npix do
+    -- load data
+    var shot_count = 0
+    var center_id = d_centers[blockIdx];
+    var img_id = center_id / (WIDTH * HEIGHT);
+    var crow = center_id / WIDTH % HEIGHT;
+    var ccol = center_id % WIDTH;
+    var data : float[11][11];
+    var status : uint[11][11];
+    for irow = 0, PATCH_WIDTH do
+      for icol = 0, PATCH_WIDTH do
+        var drow = crow + irow - HALF_WIDTH
+        var dcol = ccol + icol - HALF_WIDTH
+        if (drow >= 0 and drow < HEIGHT and dcol >= 0 and dcol < WIDTH) then
+          data[irow][icol] = d_data[{dcol, drow, img_id}].cspad;
+        elseif irow < PATCH_WIDTH then
+          data[irow][icol] = 0;
+        end
+        status[irow][icol] = 0
+      end
+    end
+    status[HALF_WIDTH][HALF_WIDTH] = center_id
+    -- flood fill
+    var FF_SCAN_LENGTH = FF_THREADS_PER_CENTER / 8;
+    var sign_x : int[8]
+    var sign_y : int[8]
+    sign_x[0] = -1; sign_x[1] = 1; sign_x[2] = 1; sign_x[3] = -1; sign_x[4] = 1; sign_x[5] = 1; sign_x[6] = -1; sign_x[7] = -1;
+    sign_y[0] = 1; sign_y[1] = 1; sign_y[2] = -1; sign_y[3] = -1; sign_y[4] = 1; sign_y[5] = -1; sign_y[6] = -1; sign_y[7] = 1; 
+    var icol : int[32]
+    var irow : int[32]
+    var base_v : int[32]
+    var dxs : int[4];
+    var dys : int[4];
+    dxs[0] = -1; dxs[1] = 1; dxs[2] = 0; dxs[3] = 0; 
+    dys[0] = 0; dys[1] = 0; dys[2] = 1; dys[3] = -1; 
+    var dx : int[32]
+    var dy : int[32]
+    for threadIdx = 0, 32 do
+      var scanline_id = threadIdx / FF_SCAN_LENGTH
+      var id_in_grp = threadIdx % (2 * FF_SCAN_LENGTH);
+      base_v[threadIdx] = id_in_grp - FF_SCAN_LENGTH;
+      icol[threadIdx] = base_v[threadIdx] * sign_x[scanline_id] + HALF_WIDTH;
+      irow[threadIdx] = base_v[threadIdx] * sign_y[scanline_id] + HALF_WIDTH;
+      var scangrp_id = threadIdx / (2 * FF_SCAN_LENGTH);
+      dx[threadIdx] = dxs[scangrp_id];
+      dy[threadIdx] = dys[scangrp_id];
+    end
+    var center_intensity = data[HALF_WIDTH][HALF_WIDTH];
+    var is_local_maximum = true
+    for i = 1, rank+1 do
+      if not is_local_maximum then break end
+      for threadIdx = 0, 32 do
+        icol[threadIdx] += dx[threadIdx];
+        irow[threadIdx] += dy[threadIdx];
+        if (data[irow[threadIdx]][icol[threadIdx]] > center_intensity) then
+          is_local_maximum = false;
+        end
+        if (data[irow[threadIdx]][icol[threadIdx]] > thr_low) then
+          if (status[irow[threadIdx]-dy[threadIdx]][icol[threadIdx]-dx[threadIdx]] == center_id) then
+            status[irow[threadIdx]][icol[threadIdx]] = center_id;
+          end
+        end
+      end
+    end
+    for i = 1, FF_SCAN_LENGTH do
+      if not is_local_maximum then break end
+      for threadIdx = 0, 32 do
+        var bound = base_v[threadIdx]
+        if bound < 0 then bound = -bound end
+        if i <= bound then
+          icol[threadIdx] += dx[threadIdx];
+          irow[threadIdx] += dy[threadIdx];
+          if (data[irow[threadIdx]][icol[threadIdx]] > center_intensity) then
+            is_local_maximum = false;
+          end
+          if (data[irow[threadIdx]][icol[threadIdx]] > thr_low) then
+            if (status[irow[threadIdx]-dy[threadIdx]][icol[threadIdx]-dx[threadIdx]] == center_id) then
+              status[irow[threadIdx]][icol[threadIdx]] = center_id;
+            end
+          end
+        end
+      end
+    end
+    if is_local_maximum then
+      var r_min = ternary(crow - HALF_WIDTH < win.top, win.top - crow, -HALF_WIDTH)
+      var r_max = ternary(crow + HALF_WIDTH > win.bot, win.bot - crow, HALF_WIDTH )
+      var c_min = ternary(ccol - HALF_WIDTH < win.left, win.left - ccol, -HALF_WIDTH )
+      var c_max = ternary(ccol + HALF_WIDTH > win.right, win.right - ccol, HALF_WIDTH )
+      var average : float = 0
+      var variance : float = 0
+      var count : int = 0
+      for r = r_min, r_max + 1 do
+        for c = c_min, c_max + 1 do
+          if in_ring(c,r,r0,dr) and d_data[{c + ccol, r + crow, img_id}].cspad < thr_low then
+            var cspad : double = d_data[{c + ccol, r + crow, img_id}].cspad
+            average += cspad
+            variance += cspad * cspad
+            count += 1
+          end
+        end
+      end
+      var stddev : double = 0.0
+      if count > 0 then
+        average /= [double](count)
+        variance = variance / [double](count) - average * average
+        stddev = sqrt(variance)
+      end
+      var peak_helper : PeakHelper
+      peak_helper:init(crow,ccol,d_data[{ccol, crow, img_id}].cspad,average,stddev, img_id%SHOTS, WIDTH,HEIGHT)
+      for r = 0, PATCH_WIDTH do
+        for c = 0, PATCH_WIDTH do
+          if status[r][c] == center_id then
+            var drow = crow + r - HALF_WIDTH
+            var dcol = ccol + c - HALF_WIDTH
+            if (drow >= 0 and drow < HEIGHT and dcol >= 0 and dcol < WIDTH) then
+              peak_helper:add_point(d_data[{dcol, drow, img_id}].cspad, drow, dcol)
+            end
+          end
+        end
+      end
+      var peak : Peak = peak_helper:get_peak()
+      if peakIsPreSelected(peak) then
+        peak.valid = true
+        peaks[{0, shot_count, img_id}] = peak
+        shot_count += 1
+        num_peaks += 1
+      end
+    end
+  end
+  var ts_stop = c.legion_get_current_time_in_micros()
+  c.printf("peakFinder_gpuCompare: (%d - %d) starts from %.6f, ends at %.6f, num_peaks:%d\n", d_data.bounds.lo.z, d_data.bounds.hi.z + 1, (ts_start) * 1e-6, (ts_stop) * 1e-6, num_peaks)
 end
 
 return AlImgProc

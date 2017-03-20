@@ -116,6 +116,8 @@ task main()
     for color in p_data.colors do
       if config.flood_only then
         AlImgProc.peakFinderV4r2_flood(p_data[color], p_peaks[color], rank, m_win, THR_HIGH, THR_LOW, r0, dr)
+      elseif config.gpu_compare then
+        AlImgProc.peakFinder_gpuCompare(p_data[color], p_peaks[color], rank, m_win, THR_HIGH, THR_LOW, r0, dr)
       else
         AlImgProc.peakFinderV4r2(p_data[color], p_peaks[color], rank, m_win, THR_HIGH, THR_LOW, r0, dr)
       end
