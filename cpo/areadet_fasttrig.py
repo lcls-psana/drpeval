@@ -1,5 +1,9 @@
-from numba import float32, jit
+from numba import float32, jit, int64
 import numpy as np
+import time
+import sys
+
+niter=int(sys.argv[1])
 
 def fasttrig_py(bkgd,calib,thresh):
     npanel,nrow,ncol = calib.shape
@@ -11,8 +15,11 @@ def fasttrig_py(bkgd,calib,thresh):
                 if val>thresh: nabovethresh+=1
     return nabovethresh
 
-fasttrig = jit(int(float32[:,:,:],float32[:,:,:]))(fasttrig_py)
+fasttrig = jit(int64(float32[:,:,:],float32[:,:,:],float32))(fasttrig_py)
 
-bkgd = np.zeros([32,185,388])
+bkgd = np.zeros([32,185,388],dtype=np.float32)
 calib = np.zeros_like(bkgd)
-print fasttrig(bkdg,calib,10)
+tstart=time.time()
+for i in range(niter):
+    fasttrig(bkgd,calib,10.1)
+print (time.time()-tstart)/niter

@@ -2,16 +2,20 @@
 #include <cstdio>
 #include <ctime>
 #include <iostream>
+#include <strings.h>
 
 static const unsigned SIZE = 32*185*388;
 static const unsigned NITER= 100;
 
 int main() {
   std::clock_t start;
+  int bytes=SIZE*sizeof(float);
   double duration;
-  float* calib = (float*)malloc(SIZE*sizeof(float));
-  float* bkgd = (float*)malloc(SIZE*sizeof(float));
-  float thresh = 10.0;
+  float* calib = (float*)malloc(bytes);
+  float* bkgd = (float*)malloc(bytes);
+  bzero(calib,bytes);
+  bzero(bkgd,bytes);
+  float thresh = 10.1;
 
   start = std::clock();
   unsigned nabovethresh=0;
