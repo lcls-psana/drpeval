@@ -19,9 +19,12 @@ int main() {
 
   start = std::clock();
   unsigned nabovethresh=0;
+  float* c_ptr_end = calib+SIZE;
   for (int ni=0; ni<NITER; ni++) {
-    for (int i=0; i<SIZE; i++) {
-      float val = calib[i]-bkgd[i];
+    float* c_ptr = calib;
+    float* b_ptr = bkgd;
+    while (c_ptr<c_ptr_end) {
+      float val = *c_ptr++ - *b_ptr++;
       if (val>thresh) nabovethresh++;
     }
   }
