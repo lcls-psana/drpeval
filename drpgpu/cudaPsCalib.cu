@@ -33,41 +33,89 @@ cudaError_t checkCuda(cudaError_t result)
   return result;
 }
 
-__global__ void kernel(float *a, 
-                       int offset, 
-                       float *dark, 
-                       short *bad, 
-                       float cmmThr,
-                       int streamSize, 
-                       float *blockSum,
-                       int *cnBlockSum)
+__device__ void reduce(float *sdata)
 {
-  int idx = threadIdx.x + blockIdx.x*blockDim.x; // thread id
+  int tid = threadIdx.x;
   
-  // check if idx < streamSize
-  if (idx < streamSize) {
- 
-    int iData = offset + idx;
-    int iDark = iData % N_PIXELS;
-    a[iData] -= dark[iDark];
+  // do reduction in shared mem
+  for(int s=1; s < blockDim.x; s*=2){
+    
+    int index = 2 * s * tid;
 
-    // calculate block sum
-    if ( bad[iDark] == 0 && a[iData] < cmmThr) {
-      int iBlock = floor( (double) iData / blockDim.x );
-      atomicAdd(&blockSum[iBlock], a[iData]);
-      atomicAdd(&cnBlockSum[iBlock], 1);
+    if (index < blockDim.x) {
+      // if a block is not a multiple of two, leave as-is
+      if (index + s < blockDim.x)
+        sdata[index] += sdata[index + s];
     }
+
+    __syncthreads();
   }
+
 }
+
+/* -------------------------- calibration kernels ------------------------------*/
+
+__global__ void kernel2(float *a, 
+                        int offset,
+                        float *dark,
+                        short *bad,
+                        float cmmThr,
+                        int streamSize,
+                        float *blockSum, 
+                        int *cnBlockSum){
+  __shared__ float sdata[185];
+  __shared__ float scount[185];
+
+  int tid = threadIdx.x;
+  int idx = threadIdx.x + blockIdx.x*blockDim.x;
+  int iData = offset + idx;
+  int iDark = iData % N_PIXELS;
+  
+  // check if this thread is within streamSize
+  a[iData] -= dark[iDark];
+  sdata[tid] = a[iData] * (bad[iDark] == 0) * (a[iData] < cmmThr);
+  scount[tid] = 1.0f * (bad[iDark] == 0) * (a[iData] < cmmThr);
+
+  __syncthreads();
+ 
+  // calculate blocksum and blockcount
+  reduce(sdata);
+  reduce(scount);
+  
+  // save results - calculate block id using offset
+  if (tid == 0){
+    int iBlock = floor( (double) iData / blockDim.x );
+    blockSum[iBlock] = sdata[0];
+    cnBlockSum[iBlock] = (int)scount[0];
+  }
+  
+}
+
 
 __global__ void common_mode(float *blockSum, int *cnBlockSum, float *sectorSum, int *cnSectorSum, int offset)
 {
-  int i = offset + threadIdx.x + blockIdx.x * blockDim.x;
-
   // calculate sector sum and sector count
-  int iSector = floor( (double) i / blockDim.x );
-  atomicAdd(&sectorSum[iSector], blockSum[i]);
-  atomicAdd(&cnSectorSum[iSector], cnBlockSum[i]);
+  __shared__ float s_blockSum[388];
+  __shared__ float s_cnBlockSum[388];
+
+  int tid = threadIdx.x;
+  int idx = threadIdx.x + blockIdx.x*blockDim.x;
+  int iBlock = idx + offset;
+  s_blockSum[tid] = blockSum[iBlock];
+  s_cnBlockSum[tid] = (float)cnBlockSum[iBlock];
+
+  __syncthreads();
+
+  reduce(s_blockSum);
+  reduce(s_cnBlockSum);
+  
+  // save results - calculate sector id using offset
+  if (tid == 0){
+    int iSector = floor( (double) iBlock / blockDim.x );
+    sectorSum[iSector] = s_blockSum[0];
+    cnSectorSum[iSector] = (int)s_cnBlockSum[0];
+  }
+  
 }
 
 __global__ void common_mode_apply(float *a, float *sectorSum, int *cnSectorSum, float *gain, int offset)
@@ -241,8 +289,10 @@ int main(int argc, char **argv)
   checkCuda( cudaMalloc((void**)&d_blockSum, blockSumBytes) );
   checkCuda( cudaMallocHost((void**)&blockSum, blockSumBytes) );
   cudaMemset(d_blockSum, 0, blockSumBytes);
-  int *d_cnBlockSum;
+  int *d_cnBlockSum, *cnBlockSum;
   checkCuda( cudaMalloc((void**)&d_cnBlockSum, nBlocks * sizeof(int)) );
+  checkCuda( cudaMallocHost((void**)&cnBlockSum, nBlocks * sizeof(int)) );
+  cudaMemset(d_cnBlockSum, 0, nBlocks * sizeof(int));
   // Sum of each sector
   float *d_sectorSum, *sectorSum; 
   checkCuda( cudaMalloc((void**)&d_sectorSum, sectorSumBytes) );
@@ -352,7 +402,10 @@ int main(int argc, char **argv)
                                stream[i]) );
 
     // calibration kernels
-    kernel<<<gridSize, blockSize, 0, stream[i]>>>(d_a, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
+    kernel2<<<gridSize, blockSize, 0, stream[i]>>>(d_a, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
+    // Common mode kernel reduce blockSum to sectorSum
+    // We use 388 threads to reduce 388 blockSum (or sum of each row)
+    // to a sector sum. No. of blocks is then equal to the no. of events.
     common_mode<<<nBlocks/(nStreams * nRows), nRows, 0, stream[i]>>>(d_blockSum, d_cnBlockSum, d_sectorSum, d_cnSectorSum, offsetSector);
     common_mode_apply<<<streamSize / blockSize, blockSize, 0, stream[i]>>>(d_a, d_sectorSum, d_cnSectorSum, d_gain, offset); 
 
@@ -377,10 +430,9 @@ int main(int argc, char **argv)
   printf("Differences          : %8.2f %8.2f %8.2f...%8.2f %8.2f %8.2f\n", a[0]-calib[0], a[1]-calib[1], a[2]-calib[2], a[n-3]-calib[nPixels-3], a[n-2]-calib[nPixels-2], a[n-1]-calib[nPixels-1]);
   printf("  max error: %e\n", maxError(a, pedCorrected, nEvents, nPixels));
      
-  /*cudaMemcpy(centers, d_centers, nCenters * sizeof(uint), cudaMemcpyDeviceToHost);
-  for (int i = 0; i < 500; i++) {
-    if (centers[i] > 0) 
-      printf("i=%d centers[i]=%d\n", i, centers[i]);
+  /*cudaMemcpy(sectorSum, d_sectorSum, nSectors * sizeof(float), cudaMemcpyDeviceToHost);
+  for (int i = 0; i < nSectors; i++) {
+    printf("i=%d sectorSum[i]=%f\n", i, sectorSum[i]);
   }*/
   //
   // cleanup
