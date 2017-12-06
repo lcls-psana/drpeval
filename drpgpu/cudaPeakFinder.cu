@@ -3,16 +3,15 @@
 #include "cudaPsCalib.h"
 
 /* ----------------------------- filterByThrHigh--------------------------------------------*/
-
 //
-// A patch is a 32 x 4 thread block. To work on a sector (388 * 185), you need 13 x 47
+// A patch is a 32 x 4 thread block. To work on a sector (388 * 185), you need 12 x 47
 // grid of patches. 
 __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int offset)
 {
   // index of this patch on a sector
   uint myBlockIdx_x = blockIdx.x + offset;
-  uint sectorId = myBlockIdx_x / FILTER_PATCH_PER_SECTOR;
-  uint patch_id = myBlockIdx_x % FILTER_PATCH_PER_SECTOR;
+  uint d_sectorId = myBlockIdx_x / FILTER_PATCH_PER_SECTOR;
+  uint patch_id = blockIdx.x % FILTER_PATCH_PER_SECTOR;
   uint patch_x = patch_id % FILTER_PATCH_ON_WIDTH;
   uint patch_y = patch_id / FILTER_PATCH_ON_WIDTH;
   __shared__ float data[FILTER_THREADS_PER_PATCH];
@@ -25,7 +24,7 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
   int row = patch_y * FILTER_PATCH_HEIGHT + irow;
   int col = patch_x * FILTER_PATCH_WIDTH + icol;
   
-  // each row of a patch is separted into 8 local areas (each has 4 pixels).
+  // each row of a patch is separated into 8 local areas (each has 4 pixels).
   // e.g. pixels 0-3 --> local area 0 
   // if any of these pixels (0-3) is more than thr_high
   // set flag in has_candidate
@@ -34,10 +33,10 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
   int local_pos = local_area * (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT) + 
                   irow * FILTER_PATCH_HEIGHT + 
                   icol % FILTER_PATCH_HEIGHT;
-
+  
   // since sectorId is calculated based on the filterPatchOffset
   // this is then correct for all streams
-  uint device_pos = sectorId * (WIDTH * HEIGHT) + row * WIDTH + col;
+  uint device_pos = d_sectorId * (WIDTH * HEIGHT) + row * WIDTH + col;
   
   __shared__ bool has_candidate[NUM_NMS_AREA];
   if (threadIdx.x < NUM_NMS_AREA) has_candidate[threadIdx.x] = false;
@@ -59,7 +58,8 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
   
   __syncthreads();
 
-  // the local area is supersized to 16 pixels
+  // identify local area which is one of the eight (4x4) possible areas
+  // in a patch
   local_area = threadIdx.x / (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT);
   if (!has_candidate[local_area])
     return;
@@ -84,7 +84,7 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
 
   if (local_tid == 0)
   {
-    uint write_pos = blockIdx.x * NUM_NMS_AREA + local_area;
+    uint write_pos = myBlockIdx_x * NUM_NMS_AREA + local_area;
     d_centers[write_pos] = idxs[local_offset];
   }
 }
@@ -92,15 +92,8 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
 
 
 /* ----------------------------- floodFill -------------------------------------------------*/
-const int PATCH_WIDTH = (2 * HALF_WIDTH + 1);
-const int FF_LOAD_THREADS_PER_CENTER = 64;
-const int FF_THREADS_PER_CENTER = 32;
-const int FF_INFO_THREADS_PER_CENTER = FF_THREADS_PER_CENTER;
-const int FF_LOAD_PASS = (2 * HALF_WIDTH +1) * (2 * HALF_WIDTH +1) / FF_LOAD_THREADS_PER_CENTER + 1;
-
 // 
-// i think this is kind of binary sum. the sum goes over this thread
-// to thread - 1, -2, -4, ...-62. The function is used after each
+// Binary sum. The function is used after each
 // pixel is determined if it's part of this center_id
 __device__ void calPreSum(int *preSum)
 {
@@ -138,7 +131,8 @@ __device__ __inline__ float warpReduce(float val, int npix, reducer r)
 
   for(; offset > 0; offset /= 2){
     int srcIdx = threadIdx.x + offset;
-    float nVal = __shfl_down_sync(0xffffffff, val, offset);
+    //float nVal = __shfl_down_sync(0xffffffff, val, offset); // cuda_9.0 (COMPUTE_70)
+    float nVal = __shfl_down(val, offset);
     if (srcIdx < npix){
       val = r(val, nVal);
     }
@@ -178,11 +172,16 @@ __device__ __inline__ bool peakIsPreSelected(float son, float npix, float amp_ma
 
 //
 // floodFill algorithm 
-__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int offset, int nEvents)
+__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int offset)
 {
   uint myBlockIdx_x = offset + blockIdx.x;
-  const uint center_id = d_centers[myBlockIdx_x];
+  const uint center_id = d_centers[myBlockIdx_x] % N_PIXELS;
+
+  // dont do anything if the center is not valid
+  if (center_id <= 0 ) return;
+  
   const uint sector_id = center_id / (WIDTH * HEIGHT);
+  const uint d_sector_id = d_centers[myBlockIdx_x] / (WIDTH * HEIGHT);
   const uint crow = center_id / WIDTH % HEIGHT;
   const uint ccol = center_id % WIDTH;
   __shared__ float data[PATCH_WIDTH][PATCH_WIDTH];
@@ -203,7 +202,7 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
     // copy data (d-to-d_shared)
     if (drow >= 0 && drow < HEIGHT && dcol >= 0 && dcol < WIDTH)
     {
-      data[irow][icol] = d_data[sector_id * (WIDTH * HEIGHT) + drow * WIDTH + dcol];
+      data[irow][icol] = d_data[d_sector_id * (WIDTH * HEIGHT) + drow * WIDTH + dcol];
     }
     else if(irow < PATCH_WIDTH)
     {
@@ -401,8 +400,8 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
                            * peak_col[id];}, deviceAdd);
 
   if (threadIdx.x == 0){
-    peak.evt = sector_id / nEvents;
-    peak.seg = sector_id % nEvents;
+    peak.evt = 0;
+    peak.seg = sector_id;
     peak.row = crow;
     peak.col = ccol;
     peak.npix = npix;
@@ -426,7 +425,7 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
       peak.row_sigma = 0;
       peak.col_sigma = 0;
     }
-    d_peaks[blockIdx.x] = peak;
+    d_peaks[myBlockIdx_x] = peak;
   }
 
   // output data
@@ -439,7 +438,7 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
     if (irow < PATCH_WIDTH && status[irow][icol] == center_id && drow >= 0 &&
         drow < HEIGHT && dcol >= 0 && dcol < WIDTH)
     {
-      d_conmap[sector_id * (WIDTH * HEIGHT) + drow * WIDTH + dcol] = status[irow][icol];
+      d_conmap[d_sector_id * (WIDTH * HEIGHT) + drow * WIDTH + dcol] = status[irow][icol];
     }
   }
 }

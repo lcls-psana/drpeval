@@ -1,13 +1,9 @@
 
 // ---------------------- peak finder expose -------------------------
-
-const long EVENTS = 100;
-// const long EVENTS = 5;
 const int MAX_PEAKS = 150;
 const long SHOTS = 32;
 const long WIDTH = 388;
 const long HEIGHT = 185;
-const long LSIZE = EVENTS * SHOTS * WIDTH * HEIGHT;
 
 const int rank = 4;
 const float thr_high = 150;
@@ -56,10 +52,26 @@ struct Win{
 const int FILTER_PATCH_WIDTH = 32;
 const int FILTER_PATCH_HEIGHT = 4;
 const int FILTER_THREADS_PER_PATCH = FILTER_PATCH_WIDTH * FILTER_PATCH_HEIGHT;
-const int FILTER_PATCH_ON_WIDTH = (WIDTH) / FILTER_PATCH_WIDTH;
+const int FILTER_PATCH_ON_WIDTH = (WIDTH + FILTER_PATCH_WIDTH -1) / FILTER_PATCH_WIDTH;
 const int FILTER_PATCH_ON_HEIGHT = (HEIGHT + FILTER_PATCH_HEIGHT - 1) / FILTER_PATCH_HEIGHT;
 const int FILTER_PATCH_PER_SECTOR = FILTER_PATCH_ON_WIDTH * FILTER_PATCH_ON_HEIGHT;
 
+// parameters for floodFill
+const int PATCH_WIDTH = (2 * HALF_WIDTH + 1);
+const int FF_LOAD_THREADS_PER_CENTER = 64;
+const int FF_THREADS_PER_CENTER = 32;
+const int FF_INFO_THREADS_PER_CENTER = FF_THREADS_PER_CENTER;
+const int FF_LOAD_PASS = (2 * HALF_WIDTH +1) * (2 * HALF_WIDTH +1) / FF_LOAD_THREADS_PER_CENTER + 1;
+
+// parameters for calibration
+#define N_PIXELS 2296960
+#define MAX_QUADS 4
+#define MAX_SECTORS 8
+#define N_ROWS 388
+#define N_COLS 185
+#define N_STREAMS 32
+#define SECTOR_SIZE 71780
+
 // exposed functions
-__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int offset, int nEvents);
+__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int offset);
 __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int offset);

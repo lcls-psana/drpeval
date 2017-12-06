@@ -14,14 +14,6 @@ using namespace std;
 
 #include "cudaPsCalib.h"
 
-#define N_PIXELS 2296960
-#define MAX_QUADS 4
-#define MAX_SECTORS 8
-#define N_ROWS 388
-#define N_COLS 185
-#define N_STREAMS 32
-#define SECTOR_SIZE 71780
-
 // Convenience function for checking CUDA runtime API results
 // can be wrapped around any runtime API call. No-op in release builds.
 inline
@@ -104,8 +96,7 @@ __global__ void common_mode(float *blockSum, int *cnBlockSum, float *sectorSum, 
   __shared__ float s_cnBlockSum[N_ROWS];
 
   int tid = threadIdx.x;
-  int idx = threadIdx.x + blockIdx.x*blockDim.x;
-  int iBlock = idx + offset;
+  int iBlock = tid + offset;
   s_blockSum[tid] = blockSum[iBlock];
   s_cnBlockSum[tid] = (float)cnBlockSum[iBlock];
 
@@ -133,6 +124,17 @@ __global__ void common_mode_apply(float *a, float *sectorSum, int *cnSectorSum, 
    
 
 /* ---------------------- host code -----------------------------*/
+void write_file(string fileName, float *data, int n)
+{
+  FILE *pFile = fopen(fileName.c_str(), "w");
+  if (pFile)
+  {
+    for (int i=0; i<n; i++)
+      fprintf(pFile, "%f\n", data[i]);
+  }
+  fclose(pFile);
+}
+
 void fill( float *p, int n, float val ) {
   for(int i = 0; i < n; i++){
     p[i] = val;
@@ -239,9 +241,9 @@ int main(int argc, char **argv)
   const int blockSize = N_COLS;                   // block size is set to no. of columns in a sector
 
   const int bytes = n * sizeof(float);			      // total size (bytes)
-  const int darkBytes = N_PIXELS * sizeof(float);	// dark size (bytes)A
+  const int darkBytes = N_PIXELS * sizeof(float);	// dark size (bytes)
 
-  const int nBlocks = ceil( (double) n / blockSize );
+  const int nBlocks = N_ROWS * nEvents; 
   const int blockSumBytes = nBlocks * sizeof(float);
 
   const int nSectors = MAX_QUADS * MAX_SECTORS * nEvents;
@@ -261,8 +263,8 @@ int main(int argc, char **argv)
   // allocate pinned host memory and device memory
   // RAW * nEVents
   float *a, *d_a; 						
-  checkCuda( cudaMallocHost((void**)&a, bytes) );// host pinned
-  checkCuda( cudaMalloc((void**)&d_a, bytes) );  // device
+  checkCuda( cudaMallocHost((void**)&a, bytes) );    // host pinned
+  checkCuda( cudaMalloc((void**)&d_a, bytes) );  // device data only allocate enough for 1 evt
   // SINGLE RAW
   float *raw;                                               
   checkCuda( cudaMallocHost((void**)&raw, darkBytes) );     
@@ -298,22 +300,30 @@ int main(int argc, char **argv)
   cudaMemset(d_sectorSum, 0, sectorSumBytes);
   int * d_cnSectorSum;
   checkCuda( cudaMalloc((void**)&d_cnSectorSum, nSectors * sizeof(int)) );
-  // Peak centroids
-  const int nCenters = FILTER_PATCH_PER_SECTOR * (FILTER_PATCH_WIDTH / FILTER_PATCH_HEIGHT)
-                         * nSectors;
+  // Peak centroids - allocate for all events
+  // 8 centers per patch, 
+  // 12x47=564  patches per sector, 
+  // 564x8=4512 centers per sector
+  // 4512x32 = 144384 centers per event.
+  const int nCentersPerSector = FILTER_PATCH_PER_SECTOR * (FILTER_PATCH_WIDTH / FILTER_PATCH_HEIGHT);
+  const int nCentersPerEvent = nCentersPerSector * MAX_QUADS * MAX_SECTORS;
+  const int nCenters = nCentersPerEvent * nEvents;
   uint *d_centers, *centers;
   checkCuda( cudaMalloc((void**)&d_centers, nCenters * sizeof(uint)) );
   checkCuda( cudaMallocHost((void**)&centers, nCenters * sizeof(uint)) );
-  cudaMemset(d_centers, 0, nCenters * sizeof(uint));
-  // Peaks
-  int nPeaks = 200;
-  Peak *d_peaks = NULL;
+  checkCuda( cudaMemset(centers, 0, nCenters * sizeof(uint)) );
+  checkCuda( cudaMemset(d_centers, 0, nCenters * sizeof(uint)));
+  // Peaks - peak is allocated for all events since we need to copy
+  // peaks for each event out.
+  int nPeaks = nCenters;  
+  Peak *d_peaks, *peaks;
   checkCuda( (cudaMalloc((void**)&d_peaks, nPeaks * sizeof(Peak))) );
-  //checkCuda( (cudaMallocHost((
-  cudaMemset(d_peaks, 0, nPeaks * sizeof(Peak));
+  checkCuda( (cudaMallocHost((void**)&peaks, nPeaks * sizeof(Peak))) );
+  checkCuda( (cudaMemset(d_peaks, 0, nPeaks * sizeof(Peak))) );
+  checkCuda( (cudaMemset(peaks, 0, nPeaks * sizeof(Peak))) );
   uint *d_conmap;
   checkCuda( (cudaMalloc((void**)&d_conmap, n * sizeof(uint))) );
-  cudaMemset(d_conmap, 0, n * sizeof(uint));
+  checkCuda( (cudaMemset(d_conmap, 0, n * sizeof(uint))) );
 
   //load the text file and put it into a single string:
   ifstream inR("data/cxid9114_r95_evt01_raw.txt");
@@ -327,11 +337,6 @@ int main(int argc, char **argv)
   for (unsigned int i=0; i<N_PIXELS; i++){
     getline(inR, line);
     raw[i] = atof(line.c_str());
-    //populate all events with the same set of test data
-    for (int j=0; j<nEvents; j++) {
-      int offset = j * N_PIXELS;
-      a[offset + i] = raw[i];
-    }
     getline(inP, line);
     dark[i] = atof(line.c_str());
     getline(inG, line);
@@ -340,6 +345,11 @@ int main(int argc, char **argv)
     bad[i] = atoi(line.c_str());
     getline(inC, line);
     calib[i] = atof(line.c_str());
+    //populate all events with the same set of test data
+    for (int j=0; j<nEvents; j++) {
+      int offset = j * N_PIXELS;
+      a[offset + i] = raw[i];
+    }
   }
   puts("Input\n");
   printf("Data       : %8.2f %8.2f %8.2f...%8.2f %8.2f %8.2f\n", a[0], a[1], a[2], a[n-3], a[n-2], a[n-1]);
@@ -378,42 +388,49 @@ int main(int argc, char **argv)
   // asynchronous version 1: loop over {copy, kernel, copy}
   checkCuda( cudaEventRecord(startEvent, 0) );
   cudaProfilerStart();
-  for (int i = 0; i < N_STREAMS; ++i) {
-    int streamSize = ceil( (double) n / N_STREAMS );  // stream size (pixels)
-    int offset = i * streamSize;
-    int offsetSector = i * (streamSize / blockSize);
-    int filterPatchStreamSize = FILTER_PATCH_PER_SECTOR * nEvents;
-    int offsetFilterPatch = i * filterPatchStreamSize;
-    int peakStreamSize = nPeaks / N_STREAMS;
-    int offsetPeakStreamSize = i * peakStreamSize;
+  for (int evt = 0; evt < nEvents; evt++) {
+    // Each event is divided into 32 streams
+    int evtOffset = evt * N_PIXELS;
+    for (int s=0; s < N_STREAMS; s++){
+      // For copying data in, the offset is calculated from evt#
+      int streamSize = ceil( (double) N_PIXELS / N_STREAMS );
+      int offset = evtOffset + (s * streamSize);
+      int streamBytes = streamSize * sizeof(float);   
+      int gridSize = ceil(  (double) streamSize / blockSize );             
 
-    // check if last stream has full length
-    if ( (i + 1) * streamSize > n ) streamSize = n - (i * streamSize);
+      checkCuda( cudaMemcpyAsync(&d_a[offset], &a[offset],
+                                 streamBytes, cudaMemcpyHostToDevice,
+                                 stream[s]) );
 
-    int streamBytes = streamSize * sizeof(float);   
-    int gridSize = ceil(  (double) streamSize / blockSize );             
-
-    checkCuda( cudaMemcpyAsync(&d_a[offset], &a[offset],
-                               streamBytes, cudaMemcpyHostToDevice,
-                               stream[i]) );
-
-    // calibration kernels
-    kernel<<<gridSize, blockSize, 0, stream[i]>>>(d_a, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
+      // calibration kernels
+      kernel<<<gridSize, blockSize, 0, stream[s]>>>(d_a, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
     
-    // Common mode kernel reduce blockSum to sectorSum
-    // We use 388 threads to reduce 388 blockSum (or sum of each row)
-    // to a sector sum. No. of blocks is then equal to the no. of events.
-    common_mode<<<nBlocks/(N_STREAMS * N_ROWS), N_ROWS, 0, stream[i]>>>(d_blockSum, d_cnBlockSum, d_sectorSum, d_cnSectorSum, offsetSector);
-    common_mode_apply<<<streamSize / blockSize, blockSize, 0, stream[i]>>>(d_a, d_sectorSum, d_cnSectorSum, d_gain, offset); 
+      // Common mode kernel reduce blockSum to sectorSum
+      // We use 388 threads to reduce 388 blockSum (or sum of each row)
+      // to a sector sum. No. of blocks is then equal to the no. of events.
+      int cmmOffset = (evt * N_ROWS * N_STREAMS) + (s * N_ROWS);
+      common_mode<<<1, N_ROWS, 0, stream[s]>>>(d_blockSum, d_cnBlockSum, d_sectorSum, d_cnSectorSum, cmmOffset);
+      common_mode_apply<<<gridSize, blockSize, 0, stream[s]>>>(d_a, d_sectorSum, d_cnSectorSum, d_gain, offset); 
 
-    // peakFinder kernels
-    filterByThrHigh_v2<<<FILTER_PATCH_PER_SECTOR * nSectors / N_STREAMS, FILTER_THREADS_PER_PATCH, 0, stream[i]>>>(d_a, d_centers, offsetFilterPatch);
-    floodFill_v2<<<nPeaks/N_STREAMS, 64, 0, stream[i]>>>(d_a, d_centers, d_peaks, d_conmap, offsetPeakStreamSize, nEvents);
+      // peakFinder kernels
+      int filterOffset = (evt * FILTER_PATCH_PER_SECTOR * N_STREAMS) + (s * FILTER_PATCH_PER_SECTOR);
+      filterByThrHigh_v2<<<FILTER_PATCH_PER_SECTOR, FILTER_THREADS_PER_PATCH, 0, stream[s]>>>(d_a, d_centers, filterOffset);
+      
+      // floodFill kernel is activiated by sending 64 threads to work
+      // on each center.
+      int ffOffset = (evt * nCentersPerSector * N_STREAMS) + (s * nCentersPerSector);
+      floodFill_v2<<<nCentersPerSector, FF_LOAD_THREADS_PER_CENTER, 0, stream[s]>>>(d_a, d_centers, d_peaks, d_conmap, ffOffset);
 
-    // copy data out
-    checkCuda( cudaMemcpyAsync(&a[offset], &d_a[offset],
+      // copy data out
+      checkCuda( cudaMemcpyAsync(&a[offset], &d_a[offset],
                                streamBytes, cudaMemcpyDeviceToHost,
-                               stream[i]) );
+                               stream[s]) );
+
+      // copy peaks out
+      checkCuda( cudaMemcpyAsync(&peaks[ffOffset], &d_peaks[ffOffset],
+                               nCentersPerSector * sizeof(Peak), cudaMemcpyDeviceToHost,
+                               stream[s]) ); 
+    }
   }
   cudaProfilerStop(); 
   checkCuda( cudaEventRecord(stopEvent, 0) );
@@ -426,12 +443,36 @@ int main(int argc, char **argv)
   printf("Differences      : %8.2f %8.2f %8.2f...%8.2f %8.2f %8.2f\n", a[0]-calib[0], a[1]-calib[1], a[2]-calib[2], a[n-3]-calib[N_PIXELS-3], a[n-2]-calib[N_PIXELS-2], a[n-1]-calib[N_PIXELS-1]);
   printf("  max error      : %e\n", maxError(a, calib, nEvents));
      
+  //write_file("calc_calib.txt", a, n);
+
   /*cudaMemcpy(sectorSum, d_sectorSum, nSectors * sizeof(float), cudaMemcpyDeviceToHost);
   for (int i = 0; i < nSectors; i++) {
     printf("i=%d sectorSum[i]=%f\n", i, sectorSum[i]);
   }*/
-  //
   
+  /*int cnNonZeroCenters = 0;
+  checkCuda( cudaMemcpy(centers, d_centers, nCenters * sizeof(uint), cudaMemcpyDeviceToHost) );
+  for (int i=0; i < nCentersPerEvent * nEvents; i++){
+    if (centers[i] != 0){
+      int sectorId1 = (float) centers[i] / SECTOR_SIZE;
+      int sectorId2 = (float) i / (nCentersPerSector);
+      printf("i: %d, centers[i]:%d sectorByPixel: %d val: %6.2f sectorByIndex:%d\n", i, centers[i], a[centers[i]], sectorId1, sectorId2);
+      cnNonZeroCenters++;
+    }
+  }
+  printf("Total non zero centers: %d\n", cnNonZeroCenters);*/
+
+  printf("nCenters: %d, nPeaks: %d, FFP_SECTOR: %d, W: %d, H: %d, nSectors: %d\n", nCenters,
+            nPeaks, FILTER_PATCH_PER_SECTOR, FILTER_PATCH_WIDTH, FILTER_PATCH_HEIGHT, nSectors);
+
+  int cnValidPeaks = 0;
+  for (int i=0; i < nPeaks; i++) {
+    if (peaks[i].valid) {
+      //printf("i: %d, evt: %d, sector: %d, row: %d, col: %d\n", i, (int)peaks[i].evt, (int)peaks[i].seg, (int)peaks[i].row, (int)peaks[i].col);
+      cnValidPeaks++;
+    }
+  }
+  printf("nValidPeaks: %d\n", cnValidPeaks);
   // cleanup
   checkCuda( cudaEventDestroy(startEvent) );
   checkCuda( cudaEventDestroy(stopEvent) );
@@ -457,7 +498,10 @@ int main(int argc, char **argv)
   cudaFree(d_centers);
   cudaFreeHost(centers);
   cudaFree(d_peaks);
+  cudaFreeHost(peaks);
   cudaFree(d_conmap);
   
+  cudaDeviceReset();
+
   return 0;
 }
