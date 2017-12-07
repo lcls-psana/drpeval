@@ -45,7 +45,46 @@ __device__ void reduce(float *sdata)
 
     __syncthreads();
   }
+}
 
+__global__ void filter_shared_k(uint *dst, int *nres, const uint *src, int n)
+{
+  __shared__ int l_n;
+  const int NPER_THREAD = 1;
+  int i = blockIdx.x * (NPER_THREAD * blockDim.x) + threadIdx.x;
+
+  for (int iter=0; iter < NPER_THREAD; iter++)
+  {
+    // zero the counter
+    if (threadIdx.x == 0)
+      l_n = 0;
+    __syncthreads();
+
+    // get the value, evaluate the predicate, and 
+    // increment the counter if needed
+    int d, pos;
+
+    if(i < n) {
+      d = src[i];
+      if(d > 0)
+        pos = atomicAdd(&l_n, 1);
+    }
+    __syncthreads();
+
+    // leader increments the global counter
+    if(threadIdx.x == 0)
+      l_n = atomicAdd(nres, l_n);
+    __syncthreads();
+
+    // threads with true predicates write their elements
+    if(i < n && d > 0) {
+      pos += l_n; // increment local pos by global counter
+      dst[pos] = d;
+    }
+    __syncthreads();
+
+    i += blockDim.x;
+  }
 }
 
 /* -------------------------- calibration kernels ------------------------------*/
@@ -259,6 +298,33 @@ int main(int argc, char **argv)
   checkCuda( cudaGetDeviceProperties(&prop, devId));
   printf("Device : %s\n", prop.name);
   checkCuda( cudaSetDevice(devId) );
+
+  // test filter array
+  int nTest = 1000;
+  int nRes = 0;
+  int *d_nRes;
+  uint *d, *fd, *d_d, *d_fd;
+
+  checkCuda( cudaMallocHost((void**)&d, nTest * sizeof(uint)) );
+  checkCuda( cudaMallocHost((void**)&fd, nTest * sizeof(uint)) );
+  checkCuda( cudaMalloc((void**)&d_d, nTest * sizeof(uint)) );
+  checkCuda( cudaMalloc((void**)&d_fd, nTest * sizeof(uint)) );
+  checkCuda( cudaMalloc((void**)&d_nRes, sizeof(int)) );
+  
+  for(int i=0; i<nTest; i++){
+    if (i % 4 == 0)
+      d[i] = i;
+  }
+  
+  checkCuda( cudaMemcpy(d_d, d, nTest * sizeof(uint), cudaMemcpyHostToDevice) );
+  
+  filter_shared_k<<<(nTest/512)+1, 512>>>(d_fd, d_nRes, d_d, nTest);
+
+  checkCuda( cudaMemcpy(&nRes, d_nRes, sizeof(int), cudaMemcpyDeviceToHost));
+  checkCuda( cudaMallocHost((void**)&fd, nRes * sizeof(uint)) );
+  checkCuda( cudaMemcpy(fd, d_fd, nRes * sizeof(uint), cudaMemcpyDeviceToHost) );
+  //for (int i =0; i<nRes; i++)
+  //  printf("i: %d, data[i]: %d\n", i, fd[i]);
 
   // allocate pinned host memory and device memory
   // RAW * nEVents
