@@ -47,11 +47,13 @@ __device__ void reduce(float *sdata)
   }
 }
 
-__global__ void filter_shared_k(uint *dst, int *nres, const uint *src, int n)
+__global__ void filter_shared_k(uint *dst, uint *nres, const uint *src, int n, int evt, int sectorId)
 {
-  __shared__ int l_n;
+  __shared__ uint l_n;
   const int NPER_THREAD = 1;
   int i = blockIdx.x * (NPER_THREAD * blockDim.x) + threadIdx.x;
+  int offset = (evt * n * MAX_QUADS * MAX_SECTORS) + (sectorId * n);
+  int iData = offset + i;
 
   for (int iter=0; iter < NPER_THREAD; iter++)
   {
@@ -62,10 +64,10 @@ __global__ void filter_shared_k(uint *dst, int *nres, const uint *src, int n)
 
     // get the value, evaluate the predicate, and 
     // increment the counter if needed
-    int d, pos;
+    uint d, pos;
 
     if(i < n) {
-      d = src[i];
+      d = src[iData];
       if(d > 0)
         pos = atomicAdd(&l_n, 1);
     }
@@ -73,13 +75,13 @@ __global__ void filter_shared_k(uint *dst, int *nres, const uint *src, int n)
 
     // leader increments the global counter
     if(threadIdx.x == 0)
-      l_n = atomicAdd(nres, l_n);
+      l_n = atomicAdd(&nres[(evt * MAX_QUADS * MAX_SECTORS) + sectorId], l_n);
     __syncthreads();
 
     // threads with true predicates write their elements
     if(i < n && d > 0) {
       pos += l_n; // increment local pos by global counter
-      dst[pos] = d;
+      dst[offset + pos] = d;
     }
     __syncthreads();
 
@@ -299,33 +301,6 @@ int main(int argc, char **argv)
   printf("Device : %s\n", prop.name);
   checkCuda( cudaSetDevice(devId) );
 
-  // test filter array
-  int nTest = 1000;
-  int nRes = 0;
-  int *d_nRes;
-  uint *d, *fd, *d_d, *d_fd;
-
-  checkCuda( cudaMallocHost((void**)&d, nTest * sizeof(uint)) );
-  checkCuda( cudaMallocHost((void**)&fd, nTest * sizeof(uint)) );
-  checkCuda( cudaMalloc((void**)&d_d, nTest * sizeof(uint)) );
-  checkCuda( cudaMalloc((void**)&d_fd, nTest * sizeof(uint)) );
-  checkCuda( cudaMalloc((void**)&d_nRes, sizeof(int)) );
-  
-  for(int i=0; i<nTest; i++){
-    if (i % 4 == 0)
-      d[i] = i;
-  }
-  
-  checkCuda( cudaMemcpy(d_d, d, nTest * sizeof(uint), cudaMemcpyHostToDevice) );
-  
-  filter_shared_k<<<(nTest/512)+1, 512>>>(d_fd, d_nRes, d_d, nTest);
-
-  checkCuda( cudaMemcpy(&nRes, d_nRes, sizeof(int), cudaMemcpyDeviceToHost));
-  checkCuda( cudaMallocHost((void**)&fd, nRes * sizeof(uint)) );
-  checkCuda( cudaMemcpy(fd, d_fd, nRes * sizeof(uint), cudaMemcpyDeviceToHost) );
-  //for (int i =0; i<nRes; i++)
-  //  printf("i: %d, data[i]: %d\n", i, fd[i]);
-
   // allocate pinned host memory and device memory
   // RAW * nEVents
   float *a, *d_a; 						
@@ -374,14 +349,22 @@ int main(int argc, char **argv)
   const int nCentersPerSector = FILTER_PATCH_PER_SECTOR * (FILTER_PATCH_WIDTH / FILTER_PATCH_HEIGHT);
   const int nCentersPerEvent = nCentersPerSector * MAX_QUADS * MAX_SECTORS;
   const int nCenters = nCentersPerEvent * nEvents;
-  uint *d_centers, *centers;
+  uint *d_centers, *centers, *d_fcenters, *fcenters;
+  uint *d_cnFCenters;
   checkCuda( cudaMalloc((void**)&d_centers, nCenters * sizeof(uint)) );
+  checkCuda( cudaMalloc((void**)&d_fcenters, nCenters * sizeof(uint)) );
+  checkCuda( cudaMalloc((void**)&d_cnFCenters, MAX_QUADS * MAX_SECTORS * nEvents * sizeof(int)) );
   checkCuda( cudaMallocHost((void**)&centers, nCenters * sizeof(uint)) );
+  checkCuda( cudaMallocHost((void**)&fcenters, nCenters * sizeof(uint)) );
   checkCuda( cudaMemset(centers, 0, nCenters * sizeof(uint)) );
+  checkCuda( cudaMemset(fcenters, 0, nCenters * sizeof(uint)) );
   checkCuda( cudaMemset(d_centers, 0, nCenters * sizeof(uint)));
+  checkCuda( cudaMemset(d_fcenters, 0, nCenters * sizeof(uint)) );
+  checkCuda( cudaMemset(d_cnFCenters, 0, MAX_QUADS * MAX_SECTORS * nEvents * sizeof(uint)) );
+
   // Peaks - peak is allocated for all events since we need to copy
   // peaks for each event out.
-  int nPeaks = nCenters;  
+  int nPeaks = MAX_PEAKS * nEvents;  
   Peak *d_peaks, *peaks;
   checkCuda( (cudaMalloc((void**)&d_peaks, nPeaks * sizeof(Peak))) );
   checkCuda( (cudaMallocHost((void**)&peaks, nPeaks * sizeof(Peak))) );
@@ -389,7 +372,7 @@ int main(int argc, char **argv)
   checkCuda( (cudaMemset(peaks, 0, nPeaks * sizeof(Peak))) );
   uint *d_conmap;
   checkCuda( (cudaMalloc((void**)&d_conmap, n * sizeof(uint))) );
-  checkCuda( (cudaMemset(d_conmap, 0, n * sizeof(uint))) );
+  //checkCuda( (cudaMemset(d_conmap, 0, n * sizeof(uint))) );
 
   //load the text file and put it into a single string:
   ifstream inR("data/cxid9114_r95_evt01_raw.txt");
@@ -482,19 +465,23 @@ int main(int argc, char **argv)
       int filterOffset = (evt * FILTER_PATCH_PER_SECTOR * N_STREAMS) + (s * FILTER_PATCH_PER_SECTOR);
       filterByThrHigh_v2<<<FILTER_PATCH_PER_SECTOR, FILTER_THREADS_PER_PATCH, 0, stream[s]>>>(d_a, d_centers, filterOffset);
       
-      // floodFill kernel is activiated by sending 64 threads to work
+      // compact centers by filtering out all the zeros
+      filter_shared_k<<<(nCentersPerSector/128)+1, 128, 0, stream[s]>>>(d_fcenters, d_cnFCenters, d_centers, nCentersPerSector, evt, s);     
+      
+      // floodFill kernel is activated by sending 64 threads to work
       // on each center.
-      int ffOffset = (evt * nCentersPerSector * N_STREAMS) + (s * nCentersPerSector);
-      floodFill_v2<<<nCentersPerSector, FF_LOAD_THREADS_PER_CENTER, 0, stream[s]>>>(d_a, d_centers, d_peaks, d_conmap, ffOffset);
-
+      int peakOffset = (evt * MAX_PEAKS) + ( s * (MAX_PEAKS / N_STREAMS) );
+      int centerOffset = (evt * nCentersPerEvent) + (s * nCentersPerSector); 
+      floodFill_v2<<<(MAX_PEAKS / N_STREAMS), FF_LOAD_THREADS_PER_CENTER, 0, stream[s]>>>(d_a, d_fcenters, d_peaks, d_conmap, centerOffset, peakOffset);
+      
       // copy data out
       checkCuda( cudaMemcpyAsync(&a[offset], &d_a[offset],
                                streamBytes, cudaMemcpyDeviceToHost,
                                stream[s]) );
-
+      
       // copy peaks out
-      checkCuda( cudaMemcpyAsync(&peaks[ffOffset], &d_peaks[ffOffset],
-                               nCentersPerSector * sizeof(Peak), cudaMemcpyDeviceToHost,
+      checkCuda( cudaMemcpyAsync(&peaks[peakOffset], &d_peaks[peakOffset],
+                               (MAX_PEAKS / N_STREAMS) * sizeof(Peak), cudaMemcpyDeviceToHost,
                                stream[s]) ); 
     }
   }
@@ -517,24 +504,20 @@ int main(int argc, char **argv)
   }*/
   
   /*int cnNonZeroCenters = 0;
-  checkCuda( cudaMemcpy(centers, d_centers, nCenters * sizeof(uint), cudaMemcpyDeviceToHost) );
+  checkCuda( cudaMemcpy(fcenters, d_fcenters, nCenters * sizeof(uint), cudaMemcpyDeviceToHost) );
   for (int i=0; i < nCentersPerEvent * nEvents; i++){
-    if (centers[i] != 0){
-      int sectorId1 = (float) centers[i] / SECTOR_SIZE;
-      int sectorId2 = (float) i / (nCentersPerSector);
-      printf("i: %d, centers[i]:%d sectorByPixel: %d val: %6.2f sectorByIndex:%d\n", i, centers[i], a[centers[i]], sectorId1, sectorId2);
+    if (fcenters[i] != 0){
+      int sectorId1 = (float) fcenters[i] / SECTOR_SIZE;
+      printf("i: %d, centers[i]:%d sectorByPixel: %d val: %6.2f\n", i, fcenters[i], sectorId1, a[fcenters[i]]);
       cnNonZeroCenters++;
     }
   }
   printf("Total non zero centers: %d\n", cnNonZeroCenters);*/
 
-  printf("nCenters: %d, nPeaks: %d, FFP_SECTOR: %d, W: %d, H: %d, nSectors: %d\n", nCenters,
-            nPeaks, FILTER_PATCH_PER_SECTOR, FILTER_PATCH_WIDTH, FILTER_PATCH_HEIGHT, nSectors);
-
   int cnValidPeaks = 0;
   for (int i=0; i < nPeaks; i++) {
     if (peaks[i].valid) {
-      //printf("i: %d, evt: %d, sector: %d, row: %d, col: %d\n", i, (int)peaks[i].evt, (int)peaks[i].seg, (int)peaks[i].row, (int)peaks[i].col);
+      //printf("%4d, %3d, %2d, %3d, %3d, %3d, %6.1f, %6.1f\n", i, (int)peaks[i].evt, (int)peaks[i].seg, (int)peaks[i].row, (int)peaks[i].col, (int)peaks[i].npix, peaks[i].amp_max, peaks[i].amp_tot);
       cnValidPeaks++;
     }
   }
@@ -567,7 +550,5 @@ int main(int argc, char **argv)
   cudaFreeHost(peaks);
   cudaFree(d_conmap);
   
-  cudaDeviceReset();
-
   return 0;
 }

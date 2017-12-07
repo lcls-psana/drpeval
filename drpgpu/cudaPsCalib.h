@@ -1,6 +1,6 @@
 
 // ---------------------- peak finder expose -------------------------
-const int MAX_PEAKS = 150;
+const int MAX_PEAKS = 160;
 const long SHOTS = 32;
 const long WIDTH = 388;
 const long HEIGHT = 185;
@@ -73,5 +73,5 @@ const int FF_LOAD_PASS = (2 * HALF_WIDTH +1) * (2 * HALF_WIDTH +1) / FF_LOAD_THR
 #define SECTOR_SIZE 71780
 
 // exposed functions
-__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int offset);
+__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int centerOffset, int peakOffset);
 __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int offset);

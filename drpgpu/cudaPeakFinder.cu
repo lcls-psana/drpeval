@@ -29,6 +29,7 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
   // if any of these pixels (0-3) is more than thr_high
   // set flag in has_candidate
   const int NUM_NMS_AREA = FILTER_PATCH_WIDTH / FILTER_PATCH_HEIGHT;
+  
   int local_area = icol / FILTER_PATCH_HEIGHT;
   int local_pos = local_area * (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT) + 
                   irow * FILTER_PATCH_HEIGHT + 
@@ -131,8 +132,8 @@ __device__ __inline__ float warpReduce(float val, int npix, reducer r)
 
   for(; offset > 0; offset /= 2){
     int srcIdx = threadIdx.x + offset;
-    //float nVal = __shfl_down_sync(0xffffffff, val, offset); // cuda_9.0 (COMPUTE_70)
-    float nVal = __shfl_down(val, offset);
+    float nVal = __shfl_down_sync(0xffffffff, val, offset); // cuda_9.0 (COMPUTE_70)
+    //float nVal = __shfl_down(val, offset);
     if (srcIdx < npix){
       val = r(val, nVal);
     }
@@ -172,16 +173,16 @@ __device__ __inline__ bool peakIsPreSelected(float son, float npix, float amp_ma
 
 //
 // floodFill algorithm 
-__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int offset)
+__global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int centerOffset, int peakOffset)
 {
-  uint myBlockIdx_x = offset + blockIdx.x;
-  const uint center_id = d_centers[myBlockIdx_x] % N_PIXELS;
+  uint myCenterId = centerOffset + blockIdx.x;
+  const uint center_id = d_centers[myCenterId] % N_PIXELS;
 
   // dont do anything if the center is not valid
   if (center_id <= 0 ) return;
   
   const uint sector_id = center_id / (WIDTH * HEIGHT);
-  const uint d_sector_id = d_centers[myBlockIdx_x] / (WIDTH * HEIGHT);
+  const uint d_sector_id = d_centers[myCenterId] / (WIDTH * HEIGHT);
   const uint crow = center_id / WIDTH % HEIGHT;
   const uint ccol = center_id % WIDTH;
   __shared__ float data[PATCH_WIDTH][PATCH_WIDTH];
@@ -400,7 +401,7 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
                            * peak_col[id];}, deviceAdd);
 
   if (threadIdx.x == 0){
-    peak.evt = 0;
+    peak.evt = peakOffset / MAX_PEAKS;
     peak.seg = sector_id;
     peak.row = crow;
     peak.col = ccol;
@@ -425,7 +426,7 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
       peak.row_sigma = 0;
       peak.col_sigma = 0;
     }
-    d_peaks[myBlockIdx_x] = peak;
+    d_peaks[peakOffset + blockIdx.x] = peak;
   }
 
   // output data
