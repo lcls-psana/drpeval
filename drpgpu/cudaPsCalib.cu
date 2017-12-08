@@ -91,7 +91,7 @@ __global__ void filter_shared_k(uint *dst, uint *nres, const uint *src, int n, i
 
 /* -------------------------- calibration kernels ------------------------------*/
 
-__global__ void kernel(float *a, 
+__global__ void pedestal_plus(float *a, 
                         int offset,
                         float *dark,
                         short *bad,
@@ -452,7 +452,7 @@ int main(int argc, char **argv)
                                  stream[s]) );
 
       // calibration kernels
-      kernel<<<gridSize, blockSize, 0, stream[s]>>>(d_a, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
+      pedestal_plus<<<gridSize, blockSize, 0, stream[s]>>>(d_a, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
     
       // Common mode kernel reduce blockSum to sectorSum
       // We use 388 threads to reduce 388 blockSum (or sum of each row)

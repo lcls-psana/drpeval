@@ -179,7 +179,7 @@ __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d
   const uint center_id = d_centers[myCenterId] % N_PIXELS;
 
   // dont do anything if the center is not valid
-  if (center_id <= 0 ) return;
+  if (d_centers[myCenterId] == 0 || d_data[d_centers[myCenterId]] < thr_high) return;
   
   const uint sector_id = center_id / (WIDTH * HEIGHT);
   const uint d_sector_id = d_centers[myCenterId] / (WIDTH * HEIGHT);
