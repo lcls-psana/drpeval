@@ -6,7 +6,7 @@ const long WIDTH = 388;
 const long HEIGHT = 185;
 
 const int rank = 4;
-const float thr_high = 150;
+const float thr_high = 250;
 const float thr_low = 10;
 const float r0 = 5;
 const float dr = 0.05;

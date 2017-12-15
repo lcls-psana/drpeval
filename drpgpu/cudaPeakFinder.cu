@@ -45,8 +45,9 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
   __syncthreads();
 
   // copy data from device to shared memory - all threads outside
-  // a sector get 0.
-  if (row < WIDTH && col < HEIGHT){
+  // a sector get 0. Zhenglin's code has HEIGHT and WIDHT swapped here
+  // - now fixed.
+  if (row >= 0 && row < HEIGHT && col >=0 && col < WIDTH){
     data[local_pos] = d_data[device_pos];
     idxs[local_pos] = device_pos;
   }
@@ -62,11 +63,20 @@ __global__ void filterByThrHigh_v2(const float *d_data, uint *d_centers, int off
   // identify local area which is one of the eight (4x4) possible areas
   // in a patch
   local_area = threadIdx.x / (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT);
+  const int local_tid = threadIdx.x % (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT);
+  
+  // reset center
+  if (local_tid == 0) 
+  {
+    uint write_pos = myBlockIdx_x * NUM_NMS_AREA + local_area;
+    d_centers[write_pos] = 0;
+  }
+
   if (!has_candidate[local_area])
     return;
   
   // check inside the local area and find the location of maximum intensity
-  const int local_tid = threadIdx.x % (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT);
+  //const int local_tid = threadIdx.x % (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT);
   const int local_offset = local_area * (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT);
   int num_of_working_threads = (FILTER_PATCH_HEIGHT * FILTER_PATCH_HEIGHT) / 2;
   int idx_mul = 1;
@@ -175,14 +185,14 @@ __device__ __inline__ bool peakIsPreSelected(float son, float npix, float amp_ma
 // floodFill algorithm 
 __global__ void floodFill_v2(const float *d_data, const uint *d_centers, Peak *d_peaks, uint *d_conmap, int centerOffset, int peakOffset)
 {
-  uint myCenterId = centerOffset + blockIdx.x;
-  const uint center_id = d_centers[myCenterId] % N_PIXELS;
+  uint myIdx = centerOffset + blockIdx.x;
+  const uint center_id = d_centers[myIdx] % N_PIXELS;
 
   // dont do anything if the center is not valid
-  if (d_centers[myCenterId] == 0 || d_data[d_centers[myCenterId]] < thr_high) return;
+  if (d_centers[myIdx] == 0 || d_data[d_centers[myIdx]] < thr_high) return;
   
   const uint sector_id = center_id / (WIDTH * HEIGHT);
-  const uint d_sector_id = d_centers[myCenterId] / (WIDTH * HEIGHT);
+  const uint d_sector_id = d_centers[myIdx] / (WIDTH * HEIGHT);
   const uint crow = center_id / WIDTH % HEIGHT;
   const uint ccol = center_id % WIDTH;
   __shared__ float data[PATCH_WIDTH][PATCH_WIDTH];

@@ -55,6 +55,13 @@ __global__ void filter_shared_k(uint *dst, uint *nres, const uint *src, int n, i
   int offset = (evt * n * MAX_QUADS * MAX_SECTORS) + (sectorId * n);
   int iData = offset + i;
 
+  // zero the dst
+  if (i < n) dst[iData] = 0;
+
+  // zero the host counter
+  if (threadIdx.x == 0)
+    nres[(evt * MAX_QUADS * MAX_SECTORS) + sectorId] = 0;
+
   for (int iter=0; iter < NPER_THREAD; iter++)
   {
     // zero the counter
@@ -176,9 +183,30 @@ void write_file(string fileName, float *data, int n)
   fclose(pFile);
 }
 
-void fill( float *p, int n, float val ) {
+void fill(uint *p, int n, float val ) {
   for(int i = 0; i < n; i++){
     p[i] = val;
+  }
+}
+
+void write_peaks(string file_name, Peak *peaks, int npeaks)
+{
+  FILE *pFile = fopen(file_name.c_str(), "w");
+  if (pFile)
+  {
+    char hdr[] = "Evt Seg  Row  Col  Npix  Amax  Atot   rcent   ccent rsigma  csigma rmin rmax cmin cmax    bkgd     rms     son\n";
+    fprintf(pFile, hdr);
+    for (int i = 0; i < npeaks; i++)
+    {
+      Peak peak = peaks[i];
+      if (peak.valid)
+      {
+        //fprintf(pFile, "%3d %3d %4d %4d  %4d  %8.1f  %8.1f  %6.1f  %6.1f %6.2f  %6.2f %4d %4d %4d %4d  %6.2f  %6.2f  %6.2f\n", int(peak.evt),
+        fprintf(pFile, "%3d,%3d,%4d,%4d,%4d,%8.1f,%8.1f,%6.1f,%6.1f,%6.2f,%6.2f,%4d,%4d,%4d,%4d,%6.2f,%6.2f,%6.2f\n", int(peak.evt),
+          (int)(peak.seg), (int)(peak.row), (int)(peak.col), (int)(peak.npix), peak.amp_max, peak.amp_tot, peak.row_cgrav, peak.col_cgrav, peak.row_sigma, peak.col_sigma,
+          (int)(peak.row_min), (int)(peak.row_max), (int)(peak.col_min), (int)(peak.col_max), peak.bkgd, peak.noise, peak.son);
+      }
+    }
   }
 }
 
@@ -303,7 +331,7 @@ int main(int argc, char **argv)
   // allocate pinned host memory and device memory
   // RAW * nEVents
   short *data, *d_data;
-  checkCuda( cudaMallocHost((void**)&data, N_PIXELS * sizeof(short)) );
+  checkCuda( cudaMallocHost((void**)&data, 20 * N_PIXELS * sizeof(short)) );
   checkCuda( cudaMalloc((void**)&d_data, N_PIXELS * sizeof(short)) );
   float *fldata, *d_fldata;
   checkCuda( cudaMallocHost((void**)&fldata, darkBytes) );
@@ -342,20 +370,20 @@ int main(int argc, char **argv)
   checkCuda( cudaMalloc((void**)&d_cnSectorSum, nSectors * sizeof(int)) );
   // Peak centroids - allocate for all events
   // 8 centers per patch, 
-  // 12x47=564  patches per sector, 
-  // 564x8=4512 centers per sector
-  // 4512x32 = 144384 centers per event.
+  // 13x47=611  patches per sector, 
+  // 611x8=4888 centers per sector
+  // 4888x32 = 156416 centers per event.
   const int nCentersPerSector = FILTER_PATCH_PER_SECTOR * (FILTER_PATCH_WIDTH / FILTER_PATCH_HEIGHT);
   const int nCentersPerEvent = nCentersPerSector * MAX_QUADS * MAX_SECTORS;
   uint *d_centers, *centers, *d_fcenters, *fcenters;
   uint *d_cnFCenters;
   checkCuda( cudaMalloc((void**)&d_centers, nCentersPerEvent * sizeof(uint)) );
   checkCuda( cudaMalloc((void**)&d_fcenters, nCentersPerEvent * sizeof(uint)) );
-  checkCuda( cudaMalloc((void**)&d_cnFCenters, MAX_QUADS * MAX_SECTORS  * sizeof(int)) );
+  checkCuda( cudaMalloc((void**)&d_cnFCenters, MAX_QUADS * MAX_SECTORS  * sizeof(uint)) );
   checkCuda( cudaMallocHost((void**)&centers, nCentersPerEvent * sizeof(uint)) );
   checkCuda( cudaMallocHost((void**)&fcenters, nCentersPerEvent * sizeof(uint)) );
-  checkCuda( cudaMemset(centers, 0, nCentersPerEvent * sizeof(uint)) );
-  checkCuda( cudaMemset(fcenters, 0, nCentersPerEvent * sizeof(uint)) );
+  fill(centers, nCentersPerEvent, 0);
+  fill(fcenters, nCentersPerEvent, 0); 
   checkCuda( cudaMemset(d_centers, 0, nCentersPerEvent * sizeof(uint)));
   checkCuda( cudaMemset(d_fcenters, 0, nCentersPerEvent * sizeof(uint)) );
   checkCuda( cudaMemset(d_cnFCenters, 0, MAX_QUADS * MAX_SECTORS * sizeof(uint)) );
@@ -363,17 +391,19 @@ int main(int argc, char **argv)
   // Peaks - peak is allocated for all events since we need to copy
   // peaks for each event out.
   int nPeaks = MAX_PEAKS * nEvents;  
-  Peak *d_peaks, *peaks;
+  Peak *d_peaks = NULL;
+  Peak *peaks = NULL;
   checkCuda( (cudaMalloc((void**)&d_peaks, nPeaks * sizeof(Peak))) );
   checkCuda( (cudaMallocHost((void**)&peaks, nPeaks * sizeof(Peak))) );
-  checkCuda( (cudaMemset(d_peaks, 0, nPeaks * sizeof(Peak))) );
-  checkCuda( (cudaMemset(peaks, 0, nPeaks * sizeof(Peak))) );
+  //checkCuda( (cudaMemset(d_peaks, 0, nPeaks * sizeof(Peak))) );
+  //checkCuda( (cudaMemset(peaks, 0, nPeaks * sizeof(Peak))) );
   uint *d_conmap;
   checkCuda( (cudaMalloc((void**)&d_conmap, n * sizeof(uint))) );
   //checkCuda( (cudaMemset(d_conmap, 0, n * sizeof(uint))) );
 
   //load the text file and put it into a single string:
-  ifstream inR("data/cxid9114_r95_evt01_raw.txt");
+  //ifstream inR("data/cxid9114_r95_evt01_raw.txt");
+  ifstream inR("data/cxid9114_r106_20events_raw.txt");
   ifstream inP("data/cxid9114_r95_evt01_ped.txt");
   ifstream inG("data/cxid9114_r95_evt01_gmap.txt");
   ifstream inB("data/cxid9114_r95_evt01_stmask.txt"); // 0 - bad, 1 - Good
@@ -381,9 +411,16 @@ int main(int argc, char **argv)
   
   // Fill arrays from text files
   string line;
+
+  for (int evt=0; evt < 20; evt++){
+    int offset = evt * N_PIXELS;
+    for (int i=0; i<N_PIXELS; i++){
+      getline(inR, line);
+      data[offset + i] = atoi(line.c_str());
+    }
+  }
+
   for (unsigned int i=0; i<N_PIXELS; i++){
-    getline(inR, line);
-    data[i] = atoi(line.c_str());
     getline(inP, line);
     dark[i] = atof(line.c_str());
     getline(inG, line);
@@ -431,46 +468,45 @@ int main(int argc, char **argv)
   checkCuda( cudaEventRecord(startEvent, 0) );
   cudaProfilerStart();
   for (int i = 0; i < nEvents; i++) {
-    int evt = 0;
+    int evt = i % 20;
     // Each event is divided into 32 streams
-    int evtOffset = evt * N_PIXELS;
     for (int s=0; s < N_STREAMS; s++){
       // For copying data in, the offset is calculated from evt#
       int streamSize = ceil( (double) N_PIXELS / N_STREAMS );
-      int offset = evtOffset + (s * streamSize);
+      unsigned long int offset = (evt * N_PIXELS) + (s * streamSize);
       int gridSize = ceil(  (double) streamSize / blockSize );             
 
-      checkCuda( cudaMemcpyAsync(&d_data[offset], &data[offset],
+      checkCuda( cudaMemcpyAsync(&d_data[s * streamSize], &data[offset],
                                  streamSize * sizeof(short), cudaMemcpyHostToDevice,
                                  stream[s]) );
 
       // calibration kernels
-      pedestal_subtraction<<<gridSize, blockSize, 0, stream[s]>>>(d_data, d_fldata, offset, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
+      pedestal_subtraction<<<gridSize, blockSize, 0, stream[s]>>>(d_data, d_fldata, s * streamSize, d_dark, d_bad, cmmThr, streamSize, d_blockSum, d_cnBlockSum);
     
       // Common mode kernel reduce blockSum to sectorSum
       // We use 388 threads to reduce 388 blockSum (or sum of each row)
       // to a sector sum. No. of blocks is then equal to the no. of events.
-      int cmmOffset = (evt * N_ROWS * N_STREAMS) + (s * N_ROWS);
+      int cmmOffset = s * N_ROWS;
       common_mode<<<1, N_ROWS, 0, stream[s]>>>(d_blockSum, d_cnBlockSum, d_sectorSum, d_cnSectorSum, cmmOffset);
-      common_mode_apply<<<gridSize, blockSize, 0, stream[s]>>>(d_fldata, d_sectorSum, d_cnSectorSum, d_gain, offset); 
+      common_mode_apply<<<gridSize, blockSize, 0, stream[s]>>>(d_fldata, d_sectorSum, d_cnSectorSum, d_gain, s * streamSize); 
 
       // peakFinder kernels
-      int filterOffset = (evt * FILTER_PATCH_PER_SECTOR * N_STREAMS) + (s * FILTER_PATCH_PER_SECTOR);
+      int filterOffset = s * FILTER_PATCH_PER_SECTOR;
       filterByThrHigh_v2<<<FILTER_PATCH_PER_SECTOR, FILTER_THREADS_PER_PATCH, 0, stream[s]>>>(d_fldata, d_centers, filterOffset);
       
       // compact centers by filtering out all the zeros
-      filter_shared_k<<<(nCentersPerSector/128)+1, 128, 0, stream[s]>>>(d_fcenters, d_cnFCenters, d_centers, nCentersPerSector, evt, s);     
+      filter_shared_k<<<(nCentersPerSector/128)+1, 128, 0, stream[s]>>>(d_fcenters, d_cnFCenters, d_centers, nCentersPerSector, 0, s);     
       
       // floodFill kernel is activated by sending 64 threads to work
       // on each center.
       int peakOffset = (i * MAX_PEAKS) + ( s * (MAX_PEAKS / N_STREAMS) );
-      int centerOffset = (evt * nCentersPerEvent) + (s * nCentersPerSector); 
+      int centerOffset = s * nCentersPerSector; 
       floodFill_v2<<<(MAX_PEAKS / N_STREAMS), FF_LOAD_THREADS_PER_CENTER, 0, stream[s]>>>(d_fldata, d_fcenters, d_peaks, d_conmap, centerOffset, peakOffset);
       
       // copy data out
-      /*checkCuda( cudaMemcpyAsync(&fldata[offset], &d_fldata[offset],
+      checkCuda( cudaMemcpyAsync(&fldata[s * streamSize], &d_fldata[s * streamSize],
                                streamSize * sizeof(float), cudaMemcpyDeviceToHost,
-                               stream[s]) );*/
+                               stream[s]) );
       
       // copy peaks out
       checkCuda( cudaMemcpyAsync(&peaks[peakOffset], &d_peaks[peakOffset],
@@ -497,24 +533,32 @@ int main(int argc, char **argv)
   }*/
   
   /*int cnNonZeroCenters = 0;
-  checkCuda( cudaMemcpy(fcenters, d_fcenters, nCenters * sizeof(uint), cudaMemcpyDeviceToHost) );
-  for (int i=0; i < nCentersPerEvent * nEvents; i++){
+  checkCuda( cudaMemcpy(fcenters, d_fcenters, nCentersPerEvent * sizeof(uint), cudaMemcpyDeviceToHost) );
+  for (int i=0; i < nCentersPerEvent; i++){
     if (fcenters[i] != 0){
       int sectorId1 = (float) fcenters[i] / SECTOR_SIZE;
-      printf("i: %d, centers[i]:%d sectorByPixel: %d val: %6.2f\n", i, fcenters[i], sectorId1, a[fcenters[i]]);
+      printf("i: %d, centers[i]:%d sectorByPixel: %d val: %6.2f\n", i, fcenters[i], sectorId1, fldata[fcenters[i]]);
       cnNonZeroCenters++;
     }
   }
   printf("Total non zero centers: %d\n", cnNonZeroCenters);*/
 
-  int cnValidPeaks = 0;
+  /*int cnValidPeaks = 0;
+  printf("i     Evt  Seg Row  Col  Npix AMax    ATot\n");
   for (int i=0; i < nPeaks; i++) {
     if (peaks[i].valid) {
-      //printf("%4d, %3d, %2d, %3d, %3d, %3d, %6.1f, %6.1f\n", i, (int)peaks[i].evt, (int)peaks[i].seg, (int)peaks[i].row, (int)peaks[i].col, (int)peaks[i].npix, peaks[i].amp_max, peaks[i].amp_tot);
+      printf("%4d, %3d, %2d, %3d, %3d, %3d, %6.1f, %6.1f\n", i, (int)peaks[i].evt, (int)peaks[i].seg, (int)peaks[i].row, (int)peaks[i].col, (int)peaks[i].npix, peaks[i].amp_max, peaks[i].amp_tot);
       cnValidPeaks++;
     }
+    else {
+      printf("%4d: Invalid\n", i);
+    }
   }
-  printf("nValidPeaks: %d\n", cnValidPeaks);
+  printf("nValidPeaks: %d\n", cnValidPeaks);*/
+
+  write_peaks("peaks.txt", peaks, nPeaks);
+  printf("Done writing peaks. See peaks.txt\n");
+
   // cleanup
   checkCuda( cudaEventDestroy(startEvent) );
   checkCuda( cudaEventDestroy(stopEvent) );
